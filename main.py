@@ -1,9 +1,27 @@
 import flet as ft
+import hashlib
 import base64
 import time
-import requests
 import threading
-import hashlib
+
+# --- СИСТЕМА ПРОВЕРКИ БИБЛИОТЕК ---
+libs_status = {}
+
+# Проверяем requests (нужен для связи с базой)
+try:
+    import requests
+    libs_status["requests"] = "OK"
+except ImportError:
+    libs_status["requests"] = "MISSING"
+
+# Проверяем cryptography (самая проблемная на Android)
+try:
+    from cryptography.fernet import Fernet
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    libs_status["cryptography"] = "OK"
+except ImportError:
+    libs_status["cryptography"] = "MISSING"
 
 # --- КОНФИГУРАЦИЯ ---
 DB_URL = "https://mess-f848e-default-rtdb.europe-west1.firebasedatabase.app"
@@ -14,123 +32,143 @@ class HoshinoTheme:
     CYAN = "#8be9fd"
     TEXT = "#f8f8f2"
     ACCENT = "#1c1e26"
+    ERROR_BG = "#442222"
 
-# --- ПРОСТОЕ ШИФРОВАНИЕ (БЕЗ ТЯЖЕЛЫХ БИБЛИОТЕК) ---
-# Чтобы избежать черного экрана из-за ошибок компиляции cryptography
-def simple_crypt(text, key, decrypt=False):
-    # Упрощенный XOR-алгоритм для теста стабильности
+# --- РЕЗЕРВНОЕ ШИФРОВАНИЕ (если cryptography упала) ---
+def fallback_crypt(text, key, decrypt=False):
     k = hashlib.sha256(key.encode()).digest()
     res = []
-    for i, char in enumerate(text.encode() if not decrypt else base64.b64decode(text)):
+    data = base64.b64decode(text) if decrypt else text.encode()
+    for i, char in enumerate(data):
         res.append(char ^ k[i % len(k)])
-    if decrypt:
-        return bytes(res).decode('utf-8', errors='ignore')
-    return base64.b64encode(bytes(res)).decode()
+    return bytes(res).decode('utf-8', errors='ignore') if decrypt else base64.b64encode(bytes(res)).decode()
 
-# --- ЛОГИКА БД ---
-class DB:
-    @staticmethod
-    def reg(n, p):
-        try:
-            hp = hashlib.sha256(p.encode()).hexdigest()
-            requests.put(f"{DB_URL}/users/{n}/pass.json", json=hp, timeout=5)
-            return True
-        except: return False
-
-    @staticmethod
-    def login(n, p):
-        try:
-            res = requests.get(f"{DB_URL}/users/{n}/pass.json", timeout=5).json()
-            return res == hashlib.sha256(p.encode()).hexdigest()
-        except: return False
-
-# --- ИНТЕРФЕЙС ---
+# --- ОСНОВНОЙ ИНТЕРФЕЙС ---
 def main(page: ft.Page):
     page.bgcolor = HoshinoTheme.BG
     page.theme_mode = ft.ThemeMode.DARK
-    page.padding = 10
+    page.title = "Hoshino Debug Mode"
+    page.padding = 0
+
+    # Проверяем, есть ли критические ошибки
+    critical_errors = [lib for lib, status in libs_status.items() if status == "MISSING"]
+
+    def get_error_panel():
+        if not critical_errors:
+            return ft.Container()
+        return ft.Container(
+            content=ft.Column([
+                ft.Text("ОШИБКА ЗАВИСИМОСТЕЙ:", color=ft.colors.WHITE, weight="bold", size=12),
+                ft.Text(f"Не удалось загрузить: {', '.join(critical_errors)}", color=HoshinoTheme.PINK, size=11),
+                ft.Text("Приложение работает в ограниченном режиме", color=ft.colors.WHITE, size=10),
+            ], spacing=2),
+            bgcolor=HoshinoTheme.ERROR_BG,
+            padding=10,
+            border_radius=ft.border_radius.only(top_left=15, top_right=15)
+        )
+
+    # --- ЭКРАН ЗАГРУЗКИ / СПЛЕШ ---
+    splash = ft.Container(
+        content=ft.Column([
+            ft.Image(src="https://raw.githubusercontent.com/flet-dev/flet/main/package/flet/src/flet/assets/icon.png", width=100),
+            ft.ProgressRing(color=HoshinoTheme.PINK),
+            ft.Text("Инициализация систем...", color=HoshinoTheme.CYAN),
+        ], horizontal_alignment="center", alignment="center"),
+        expand=True
+    )
+
+    # Главный контейнер, куда будем подгружать контент
+    main_container = ft.Container(content=splash, expand=True)
     
-    # Состояние
-    state = {"nick": page.client_storage.get("nick"), "room": None, "key": ""}
+    # Слой с ошибками (всегда сверху снизу)
+    layout = ft.Column([
+        main_container,
+        get_error_panel()
+    ], expand=True, spacing=0)
 
-    def show_auth():
-        page.clean()
-        nick_f = ft.TextField(label="Никнейм", border_color=HoshinoTheme.CYAN)
-        pass_f = ft.TextField(label="Пароль", password=True, border_color=HoshinoTheme.PINK)
+    page.add(layout)
 
-        def on_login(e):
-            if DB.login(nick_f.value, pass_f.value):
-                state["nick"] = nick_f.value
-                page.client_storage.set("nick", nick_f.value)
-                show_home()
-            else:
-                page.open(ft.SnackBar(ft.Text("Ошибка входа")))
+    # --- ЛОГИКА ПРИЛОЖЕНИЯ ---
+    def start_app():
+        time.sleep(2) # Имитация загрузки для проверки сплеша
+        
+        # Если нет requests, дальше идти нельзя
+        if libs_status.get("requests") == "MISSING":
+            main_container.content = ft.Column([
+                ft.Icon(ft.icons.ERROR_OUTLINE, color="red", size=50),
+                ft.Text("Критическая ошибка: отсутствует модуль 'requests'", textAlign="center")
+            ], alignment="center", horizontal_alignment="center")
+            page.update()
+            return
 
-        page.add(
-            ft.Column([
-                ft.Text("HOSHINO", size=50, color=HoshinoTheme.PINK, weight="bold"),
+        show_login()
+
+    def show_login():
+        nick_f = ft.TextField(label="Никнейм", border_color=HoshinoTheme.CYAN, border_radius=15)
+        pass_f = ft.TextField(label="Пароль", password=True, border_color=HoshinoTheme.PINK, border_radius=15)
+
+        def do_login(e):
+            # Простая проверка через requests
+            try:
+                res = requests.get(f"{DB_URL}/users/{nick_f.value}/pass.json", timeout=5).json()
+                hp = hashlib.sha256(pass_f.value.encode()).hexdigest()
+                if res == hp:
+                    page.client_storage.set("nick", nick_f.value)
+                    show_chat_select(nick_f.value)
+                else:
+                    page.open(ft.SnackBar(ft.Text("Ошибка входа!")))
+            except Exception as ex:
+                page.open(ft.SnackBar(ft.Text(f"Ошибка сети: {ex}")))
+
+        main_container.content = ft.Container(
+            content=ft.Column([
+                ft.Text("HOSHINO", size=45, weight="bold", color=HoshinoTheme.PINK),
                 nick_f, pass_f,
-                ft.ElevatedButton("ВОЙТИ", on_click=on_login, bgcolor=HoshinoTheme.PINK, color="white"),
-                ft.TextButton("РЕГИСТРАЦИЯ", on_click=lambda _: DB.reg(nick_f.value, pass_f.value))
-            ], horizontal_alignment="center", alignment="center", expand=True)
+                ft.ElevatedButton("ВОЙТИ", on_click=do_login, bgcolor=HoshinoTheme.PINK, color="white", width=200),
+                ft.TextButton("РЕГИСТРАЦИЯ (тест)", on_click=lambda _: requests.put(f"{DB_URL}/users/{nick_f.value}/pass.json", json=hashlib.sha256(pass_f.value.encode()).hexdigest()))
+            ], horizontal_alignment="center", spacing=15),
+            padding=40
         )
+        page.update()
 
-    def show_home():
-        page.clean()
-        room_f = ft.TextField(label="ID Чата", border_color=HoshinoTheme.CYAN)
-        key_f = ft.TextField(label="Ключ чата", password=True, border_color=HoshinoTheme.PINK)
+    def show_chat_select(nick):
+        main_container.content = ft.Column([
+            ft.AppBar(title=ft.Text(f"Привет, {nick}"), bgcolor=HoshinoTheme.ACCENT),
+            ft.Container(
+                content=ft.Column([
+                    ft.Text("Выберите чат или создайте новый", color=HoshinoTheme.CYAN),
+                    ft.ElevatedButton("Демо-чат", on_click=lambda _: show_chat_room("demo", nick))
+                ], horizontal_alignment="center"),
+                padding=20
+            )
+        ])
+        page.update()
 
-        def on_join(e):
-            state["room"] = room_f.value
-            state["key"] = key_f.value
-            show_chat()
-
-        page.add(
-            ft.AppBar(title=ft.Text(f"Аккаунт: {state['nick']}"), bgcolor=HoshinoTheme.ACCENT),
-            ft.Column([
-                room_f, key_f,
-                ft.ElevatedButton("В ЧАТ", on_click=on_join, bgcolor=HoshinoTheme.CYAN, color="black")
-            ], spacing=20),
-            ft.FloatingActionButton(icon=ft.icons.LOGOUT, on_click=lambda _: (page.client_storage.remove("nick"), show_auth()))
-        )
-
-    def show_chat():
-        page.clean()
-        messages = ft.Column(scroll="always", expand=True)
-        msg_input = ft.TextField(hint_text="Сообщение...", expand=True)
+    def show_chat_room(room_id, nick):
+        msgs = ft.Column(scroll="always", expand=True)
+        input_f = ft.TextField(hint_text="Сообщение...", expand=True)
 
         def send(e):
-            if msg_input.value:
-                enc = simple_crypt(msg_input.value, state["key"])
-                requests.post(f"{DB_URL}/rooms/{state['room']}/m.json", json={
-                    "u": state["nick"], "t": enc, "ts": time.time()
-                })
-                msg_input.value = ""
-                page.update()
+            # Если cryptography нет, используем fallback
+            raw_text = input_f.value
+            if libs_status["cryptography"] == "OK":
+                # Здесь была бы логика Fernet, но для стабильности юзаем fallback если боимся вылета
+                enc = fallback_crypt(raw_text, "key123")
+            else:
+                enc = fallback_crypt(raw_text, "key123")
+            
+            requests.post(f"{DB_URL}/rooms/{room_id}/m.json", json={"u": nick, "t": enc, "ts": time.time()})
+            input_f.value = ""
+            page.update()
 
-        def sync():
-            while state["room"]:
-                try:
-                    res = requests.get(f"{DB_URL}/rooms/{state['room']}/m.json").json()
-                    if res:
-                        messages.controls.clear()
-                        for k in sorted(res.keys(), key=lambda x: res[x]['ts']):
-                            m = res[k]
-                            txt = simple_crypt(m['t'], state["key"], decrypt=True)
-                            messages.controls.append(ft.Text(f"{m['u']}: {txt}"))
-                        page.update()
-                except: pass
-                time.sleep(3)
+        main_container.content = ft.Column([
+            ft.AppBar(title=ft.Text(f"Комната: {room_id}")),
+            msgs,
+            ft.Row([input_f, ft.IconButton(ft.icons.SEND, on_click=send)], padding=10)
+        ])
+        page.update()
 
-        page.add(
-            ft.AppBar(title=ft.Text(state["room"]), leading=ft.IconButton(ft.icons.ARROW_BACK, on_click=lambda _: show_home())),
-            messages,
-            ft.Row([msg_input, ft.IconButton(ft.icons.SEND, on_click=send)])
-        )
-        threading.Thread(target=sync, daemon=True).start()
-
-    # Точка старта
-    if state["nick"]: show_home()
-    else: show_auth()
+    # Запускаем приложение в отдельном потоке, чтобы интерфейс не вис
+    threading.Thread(target=start_app, daemon=True).start()
 
 ft.app(target=main)
