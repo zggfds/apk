@@ -2,7 +2,7 @@ name: Build Flet APK
 on:
   push:
     branches: [ main ]
-  workflow_dispatch: # Позволяет запускать сборку вручную
+  workflow_dispatch:
 
 jobs:
   build:
@@ -22,23 +22,28 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Install Flutter
+      - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
 
-      - name: Install Dependencies
+      - name: Install Python Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install flet
+          # Установка flet и зависимостей для сборки
+          pip install flet cryptography requests
+
+      - name: Fix Git Dubious Ownership
+        run: git config --global --add safe.directory '*'
 
       - name: Build APK
         run: |
-          # Flet build apk создаст бинарный файл
+          # Команда сборки. Она автоматически подтянет требования из requirements.txt, 
+          # но мы также передаем их явно для надежности.
           flet build apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: flet-app-apk
+          name: hoshino-messenger-apk
           path: build/apk/*.apk
