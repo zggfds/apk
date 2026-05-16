@@ -6,7 +6,7 @@ import threading
 import hashlib
 
 # --- КОНФИГУРАЦИЯ ---
-DB_URL = "https://mess-f848e-default-rtdb.europe-west1.firebasedatabase.ap"
+DB_URL = "https://mess-f848e-default-rtdb.europe-west1.firebasedatabase.app"
 
 class HoshinoTheme:
     BG = "#12131a"
